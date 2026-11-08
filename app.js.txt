@@ -1,0 +1,1247 @@
+// ===== My Language Learning Hub =====
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
+
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const PDFJS_BASE = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.4.168/build/';
+let pdfjsLib = null;
+async function loadPdfJs() {
+  if (!pdfjsLib) {
+    pdfjsLib = await import(PDFJS_BASE + 'pdf.min.mjs');
+    pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_BASE + 'pdf.worker.min.mjs';
+  }
+  return pdfjsLib;
+}
+
+/* ================= STATE & HELPERS ================= */
+const S = { user: null, lang: localStorage.getItem('hub_lang') === 'ja' ? 'ja' : 'en', settings: null, cats: [], cleanup: null };
+const $ = (s, r = document) => r.querySelector(s);
+const $ = (s, r = document) => [...r.querySelectorAll(s)];
+const view = () => $('#view');
+const isJa = () => S.lang === 'ja';
+const langName = () => (isJa() ? 'ภาษาญี่ปุ่น 日本語' : 'ภาษาอังกฤษ English');
+const icons = () => window.lucide?.createIcons();
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// Furigana syntax: 漢字[かんじ] -> <ruby>
+const rich = s => esc(s).replace(/([\u3005\u3400-\u9FFF]+)\[([^\]]+)\]/g, '<ruby>$1<rt>$2</rt></ruby>').replace(/\n/g, '<br>');
+const plain = s => String(s ?? '').replace(/\[[^\]]*\]/g, '');
+const shuffle = a => { const b = [...a]; for (let i = b.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [b[i], b[j]] = [b[j], b[i]]; } return b; };
+const dayKey = d => { const x = new Date(d); return `${x.getFullYear()}-${x.getMonth()}-${x.getDate()}`; };
+const lastNDays = n => Array.from({ length: n }, (_, i) => { const d = new Date(); d.setDate(d.getDate() - (n - 1 - i)); return d; });
+const endOfToday = () => { const d = new Date(); d.setHours(23, 59, 59, 999); return d; };
+const isDue = x => x.due_at && new Date(x.due_at) <= endOfToday();
+const byDesc = k => (a, b) => new Date(b[k]) - new Date(a[k]);
+const fmtDate = d => (d ? new Date(d).toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' }) : '-');
+const fmtDateTime = d => new Date(d).toLocaleString('th-TH', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+const fmtSize = b => (b < 1048576 ? Math.max(1, Math.round(b / 1024)) + ' KB' : (b / 1048576).toFixed(1) + ' MB');
+const loader = (t = 'กำลังโหลด...') => `<div class="loader"><div class="spinner"></div><span>${t}</span></div>`;
+const empty = (icon, text, extra = '') => `<div class="empty"><i data-lucide="${icon}"></i><p>${text}</p>${extra}</div>`;
+const sumOn = (acts, day, actions) => acts.filter(a => dayKey(a.created_at) === dayKey(day) && actions.includes(a.action)).reduce((s, a) => s + (a.amount || 1), 0);
+const stat = (icon, val, label, extra = '') => `<div class="card stat"><div class="ico"><i data-lucide="${icon}"></i></div><b>${val}</b><span>${label}</span>${extra}</div>`;
+function timeAgo(d) {
+  const s = (Date.now() - new Date(d)) / 1000;
+  if (s < 60) return 'เมื่อสักครู่';
+  if (s < 3600) return Math.floor(s / 60) + ' นาทีที่แล้ว';
+  if (s < 86400) return Math.floor(s / 3600) + ' ชั่วโมงที่แล้ว';
+  return Math.floor(s / 86400) + ' วันที่แล้ว';
+}
+const TYPE_LABEL = { vocab: 'Vocab', grammar: 'Grammar', kanji: 'Kanji', docs: 'PDF' };
+const ACT = {
+  add_vocab: ['🔤', 'เพิ่มคำศัพท์'], add_grammar: ['📘', 'เพิ่ม Grammar'], add_kanji: ['✍️', 'เพิ่มคันจิ'],
+  upload_doc: ['📄', 'อัปโหลด PDF'], study_grammar: ['✅', 'เรียน Grammar'], review: ['🃏', 'ทบทวน Flashcards'], quiz: ['🧠', 'ทำ Quiz'],
+};
+const DIFF = ['Beginner', 'Intermediate', 'Advanced'];
+const JLPT = ['N5', 'N4', 'N3', 'N2', 'N1'];
+const POS_EN = ['noun', 'verb', 'adjective', 'adverb', 'pronoun', 'preposition', 'conjunction', 'interjection', 'phrasal verb', 'idiom', 'phrase'];
+const POS_JA = ['名詞 Noun', '動詞 Verb', 'い形容詞 i-Adjective', 'な形容詞 na-Adjective', '副詞 Adverb', '助詞 Particle', '接続詞 Conjunction', '表現 Expression'];
+const DOC_CATS = ['Grammar', 'Vocabulary', 'Reading', 'Listening', 'Writing', 'JLPT', 'Other'];
+const DEFAULT_GOALS = { vocab: 10, grammar: 1, minutes: 15 };
+const DEFAULT_CATS = {
+  vocab: ['Daily Life', 'Business', 'Travel', 'Education', 'Food', 'Technology', 'Conversation', 'General Vocabulary'],
+  grammar: { en: ['Tenses', 'Modal Verbs', 'Conditionals', 'Passive Voice', 'Clauses', 'Other'], ja: ['Particles 助詞', 'Verb Forms', 'Conditionals', 'Keigo 敬語', 'Expressions', 'Other'] },
+};
+
+/* ================= UI PRIMITIVES ================= */
+function toast(msg, type = 'ok') {
+  const t = document.createElement('div');
+  t.className = `toast ${type}`; t.textContent = msg;
+  $('#toasts').append(t); setTimeout(() => t.remove(), 3500);
+}
+function fail(error, ctx = 'เกิดข้อผิดพลาด:') { console.error(error); toast(`${ctx} ${error?.message || error}`, 'err'); }
+
+function modal(title, body, { wide = false, onClose } = {}) {
+  const m = $('#modal');
+  m.innerHTML = `<div class="modal-card ${wide ? 'wide' : ''}"><div class="modal-head"><h3>${title}</h3><button class="icon-btn" data-close aria-label="ปิด"><i data-lucide="x"></i></button></div><div class="modal-body">${body}</div></div>`;
+  m.classList.add('open'); icons();
+  m.onclick = e => { if (e.target === m || e.target.closest('[data-close]')) { closeModal(); onClose?.(); } };
+  return m;
+}
+function closeModal() { const m = $('#modal'); m.classList.remove('open'); m.innerHTML = ''; }
+function confirmBox(text, okText = 'ลบ') {
+  return new Promise(res => {
+    modal('ยืนยัน', `<p>${esc(text)}</p><div class="form-actions"><button class="btn ghost" data-close>ยกเลิก</button><button class="btn danger" id="cf-ok">${okText}</button></div>`, { onClose: () => res(false) });
+    $('#cf-ok').onclick = () => { closeModal(); res(true); };
+  });
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#modal').classList.contains('open')) closeModal(); });
+
+function chart(labels, series) {
+  const max = Math.max(1, ...series.flatMap(s => s.values));
+  return `<div class="chart">${labels.map((lb, i) => `<div class="chart-col"><div class="bars">${series.map(s => `<div class="bar" style="height:${(s.values[i] / max) * 100}%;background:${s.color}" title="${s.name}: ${s.values[i]}"></div>`).join('')}</div><span class="chart-label">${lb}</span></div>`).join('')}</div>
+  ${series.length > 1 ? `<div class="legend">${series.map(s => `<span><i style="background:${s.color}"></i>${s.name}</span>`).join('')}</div>` : ''}`;
+}
+function calcStreak(acts) {
+  const days = new Set(acts.map(a => dayKey(a.created_at)));
+  const d = new Date(); let n = 0;
+  if (!days.has(dayKey(d))) d.setDate(d.getDate() - 1);
+  while (days.has(dayKey(d))) { n++; d.setDate(d.getDate() - 1); }
+  return n;
+}
+function calcProgress(V, G, K) {
+  const total = V.length + G.length + K.length;
+  const learned = V.filter(x => x.interval_days >= 3).length + G.filter(x => x.studied).length + K.filter(x => x.interval_days >= 3).length;
+  return total ? Math.round((learned / total) * 100) : 0;
+}
+const historyTable = H => H.length
+  ? `<div class="table-wrap"><table class="table"><thead><tr><th>วันที่</th><th>รูปแบบ</th><th>คะแนน</th><th>เวลา</th></tr></thead><tbody>${H.map(h => `<tr><td>${fmtDateTime(h.created_at)}</td><td>${esc(h.mode)}</td><td><b>${h.score}/${h.total}</b> (${h.total ? Math.round((h.score / h.total) * 100) : 0}%)</td><td>${Math.max(1, Math.round(h.duration_sec / 60))} นาที</td></tr>`).join('')}</tbody></table></div>`
+  : '<p class="muted small">ยังไม่มีประวัติการทบทวน</p>';
+
+/* ================= SETTINGS & CATEGORIES ================= */
+async function loadSettings() {
+  let { data, error } = await sb.from('user_settings').select('*').maybeSingle();
+  if (error) throw error;
+  if (!data) {
+    const ins = await sb.from('user_settings').insert({ current_language: S.lang, display_name: S.user.email.split('@')[0], goals: { en: DEFAULT_GOALS, ja: DEFAULT_GOALS } }).select().single();
+    if (ins.error) throw ins.error;
+    data = ins.data;
+    const rows = [];
+    for (const lang of ['en', 'ja']) {
+      DEFAULT_CATS.vocab.forEach(name => rows.push({ language: lang, kind: 'vocab', name }));
+      DEFAULT_CATS.grammar[lang].forEach(name => rows.push({ language: lang, kind: 'grammar', name }));
+    }
+    await sb.from('categories').insert(rows);
+  }
+  S.settings = data;
+  S.lang = data.current_language;
+  localStorage.setItem('hub_lang', S.lang);
+  await loadCats();
+}
+async function loadCats() { const { data } = await sb.from('categories').select('*').order('name'); S.cats = data || []; }
+const catsOf = kind => S.cats.filter(c => c.language === S.lang && c.kind === kind);
+async function ensureCat(kind, name) {
+  if (!name || catsOf(kind).some(c => c.name === name)) return;
+  const { data, error } = await sb.from('categories').insert({ language: S.lang, kind, name }).select().single();
+  if (error) return fail(error);
+  S.cats.push(data);
+}
+const goals = () => ({ ...DEFAULT_GOALS, ...(S.settings?.goals?.[S.lang] || {}) });
+function logActivity(action, amount = 1, lang = S.lang) {
+  sb.from('activity_log').insert({ language: lang, action, amount }).then(({ error }) => error && console.error(error));
+}
+
+/* ================= LANGUAGE SWITCH & NAV ================= */
+const MENU = [
+  { r: 'dashboard', l: 'Dashboard', i: 'layout-dashboard' },
+  { r: 'grammar', l: 'Grammar', ja: 'Grammar (文法)', i: 'book-open' },
+  { r: 'vocab', l: 'Vocabulary', ja: 'Vocabulary (語彙)', i: 'languages' },
+  { r: 'kanji', l: 'Kanji (漢字)', i: 'pen-tool', jaOnly: true },
+  { r: 'docs', l: 'Documents (PDF)', i: 'file-text' },
+  { r: 'review', l: 'Review & Flashcards', i: 'layers' },
+  { r: 'progress', l: 'Learning Progress', i: 'trending-up' },
+  { r: 'settings', l: 'Settings', i: 'settings' },
+];
+const currentPage = () => (location.hash.replace(/^#\/?/, '').split('?')[0].split('/')[0] || 'dashboard');
+
+function renderSidebar() {
+  const cur = currentPage();
+  $('#nav').innerHTML = MENU.filter(m => !m.jaOnly || isJa())
+    .map(m => `<a href="#/${m.r}" class="nav-item ${cur === m.r ? 'active' : ''}"><i data-lucide="${m.i}"></i><span>${isJa() && m.ja ? m.ja : m.l}</span></a>`).join('');
+  $('#side-lang').textContent = isJa() ? '🇯🇵 Japanese workspace' : '🇬🇧 English workspace';
+  icons();
+}
+function applyLang() {
+  document.body.dataset.lang = S.lang;
+  $('#lang-toggle').innerHTML = `<span class="${!isJa() ? 'on' : ''}">🇬🇧<em class="lbl"> English</em></span><span class="${isJa() ? 'on' : ''}">🇯🇵<em class="lbl"> 日本語</em></span>`;
+  renderSidebar();
+}
+async function switchLang() {
+  S.lang = isJa() ? 'en' : 'ja';
+  localStorage.setItem('hub_lang', S.lang);
+  if (S.settings) S.settings.current_language = S.lang;
+  applyLang();
+  toast(isJa() ? '🇯🇵 เปลี่ยนเป็นพื้นที่เรียนภาษาญี่ปุ่น' : '🇬🇧 เปลี่ยนเป็นพื้นที่เรียนภาษาอังกฤษ');
+  let base = currentPage();
+  if (base === 'kanji' && !isJa()) base = 'dashboard';
+  const target = `#/${base}`;
+  if (location.hash !== target) location.hash = target; else router();
+  const { error } = await sb.from('user_settings').update({ current_language: S.lang, updated_at: new Date().toISOString() }).eq('user_id', S.user.id);
+  if (error) fail(error, 'บันทึกภาษาล่าสุดไม่สำเร็จ:');
+}
+const closeSidebar = () => { $('#sidebar').classList.remove('open'); $('#overlay').classList.remove('show'); };
+$('#menu-btn').onclick = () => { $('#sidebar').classList.add('open'); $('#overlay').classList.add('show'); };
+$('#overlay').onclick = closeSidebar;
+$('#lang-toggle').onclick = switchLang;
+$('#search-form').onsubmit = e => {
+  e.preventDefault();
+  const v = $('#global-search').value.trim();
+  if (v) location.hash = '#/search?q=' + encodeURIComponent(v);
+};
+
+/* ================= ROUTER ================= */
+const ROUTES = {
+  dashboard: r => renderDashboard(r),
+  grammar: (r, p) => (p ? renderDetail(r, 'grammar', p) : renderCollection(r, 'grammar')),
+  vocab: (r, p) => (p ? renderDetail(r, 'vocab', p) : renderCollection(r, 'vocab')),
+  kanji: (r, p) => (p ? renderDetail(r, 'kanji', p) : renderCollection(r, 'kanji')),
+  docs: (r, p) => (p ? renderViewer(r, p) : renderDocs(r)),
+  review: r => renderReview(r),
+  progress: r => renderProgress(r),
+  settings: r => renderSettings(r),
+  search: (r, p, qs) => renderSearch(r, qs),
+};
+async function router() {
+  if (!S.user) return;
+  S.cleanup?.(); S.cleanup = null;
+  const [path, qs = ''] = location.hash.replace(/^#\/?/, '').split('?');
+  const parts = path.split('/');
+  const page = parts[0] || 'dashboard', param = parts[1];
+  if (!ROUTES[page] || (page === 'kanji' && !isJa())) { location.hash = '#/dashboard'; return; }
+  renderSidebar(); closeSidebar();
+  $('#main').classList.toggle('full', page === 'docs' && !!param);
+  if (page !== 'search') $('#global-search').value = '';
+  // Each route renders into its own root -> stale async renders never overwrite the new page
+  const root = document.createElement('div');
+  root.className = 'route';
+  root.innerHTML = loader();
+  view().replaceChildren(root);
+  window.scrollTo(0, 0);
+  try { await ROUTES[page](root, param, new URLSearchParams(qs)); }
+  catch (e) {
+    console.error(e);
+    root.innerHTML = `<div class="error-box"><i data-lucide="triangle-alert"></i><p>เกิดข้อผิดพลาด: ${esc(e.message || e)}</p><button class="btn" onclick="location.reload()">ลองใหม่</button></div>`;
+  }
+  icons();
+}
+window.addEventListener('hashchange', router);
+
+/* ================= COLLECTION CONFIG ================= */
+const COL = {
+  grammar: {
+    table: 'grammar', name: 'Grammar', title: () => (isJa() ? 'Grammar (文法)' : 'Grammar'),
+    catKind: 'grammar', levelKey: 'difficulty', levels: () => DIFF, titleKey: 'title', subKey: 'meaning_th', addAct: 'add_grammar',
+    search: ['title', 'meaning_th', 'explanation', 'examples', 'usage', 'notes', 'romaji', 'category'],
+    fields: () => [
+      { k: 'title', l: 'Grammar Title', req: true, full: true, hint: isJa() ? 'Furigana: พิมพ์ 漢字[かんじ] เพื่อแสดงคำอ่านเหนือคันจิ' : '' },
+      { k: 'romaji', l: 'Romaji', ja: true },
+      { k: 'category', l: 'Grammar Category', t: 'cat' },
+      { k: 'difficulty', l: 'Difficulty Level', t: 'select', o: DIFF },
+      { k: 'meaning_th', l: 'Meaning in Thai', t: 'area' },
+      { k: 'explanation', l: 'Explanation', t: 'area', full: true },
+      { k: 'usage', l: 'Usage / Structure', t: 'area', full: true },
+      { k: 'examples', l: 'Example Sentences', t: 'area', full: true, ph: 'หนึ่งประโยคต่อบรรทัด' },
+      { k: 'example_translation', l: 'Example Translation', t: 'area', full: true },
+      { k: 'notes', l: 'Notes', t: 'area', full: true },
+    ],
+  },
+  vocab: {
+    table: 'vocabulary', name: 'คำศัพท์', title: () => (isJa() ? 'Vocabulary (語彙)' : 'Vocabulary'),
+    catKind: 'vocab', levelKey: 'level', levels: () => (isJa() ? JLPT : DIFF), titleKey: 'word', subKey: 'meaning_th', addAct: 'add_vocab',
+    search: ['word', 'kanji', 'hiragana', 'katakana', 'romaji', 'meaning_th', 'meaning_en', 'example', 'notes'],
+    fields: () => [
+      { k: 'word', l: 'Word', req: true },
+      { k: 'kanji', l: 'Kanji', ja: true }, { k: 'hiragana', l: 'Hiragana', ja: true },
+      { k: 'katakana', l: 'Katakana', ja: true }, { k: 'romaji', l: 'Romaji', ja: true },
+      { k: 'pronunciation', l: 'Pronunciation' }, { k: 'ipa', l: 'IPA', en: true, ph: '/ɪɡˈzæmpəl/' },
+      { k: 'meaning_th', l: 'Meaning in Thai', req: true }, { k: 'meaning_en', l: 'Meaning in English' },
+      { k: 'part_of_speech', l: 'Part of Speech', t: 'select', o: () => (isJa() ? POS_JA : POS_EN) },
+      { k: 'category', l: 'Category', t: 'cat' },
+      { k: 'level', l: isJa() ? 'JLPT Level' : 'Difficulty Level', t: 'select', o: () => (isJa() ? JLPT : DIFF) },
+      { k: 'example', l: 'Example Sentence', t: 'area', full: true, hint: isJa() ? 'รองรับ Furigana: 漢字[かんじ]' : '' },
+      { k: 'example_translation', l: 'Example Translation', t: 'area', full: true },
+      { k: 'notes', l: 'Additional Notes', t: 'area', full: true },
+    ],
+  },
+  kanji: {
+    table: 'kanji', name: 'Kanji', title: () => 'Kanji (漢字)',
+    catKind: null, levelKey: 'jlpt', levels: () => JLPT, titleKey: 'character', subKey: 'meaning_th', addAct: 'add_kanji',
+    search: ['character', 'onyomi', 'kunyomi', 'hiragana', 'meaning_th', 'meaning_en', 'example_words'],
+    fields: () => [
+      { k: 'character', l: 'Kanji Character', req: true },
+      { k: 'jlpt', l: 'JLPT Level', t: 'select', o: JLPT },
+      { k: 'onyomi', l: 'Onyomi (音読み)', ph: 'カ, ゲ' }, { k: 'kunyomi', l: 'Kunyomi (訓読み)', ph: 'した, さ.げる' },
+      { k: 'hiragana', l: 'Hiragana Reading' }, { k: 'strokes', l: 'Stroke Count', t: 'number' },
+      { k: 'meaning_th', l: 'Meaning in Thai', req: true }, { k: 'meaning_en', l: 'Meaning in English' },
+      { k: 'example_words', l: 'Example Words', t: 'area', full: true, ph: '下着[したぎ] - ชุดชั้นใน' },
+      { k: 'example_sentences', l: 'Example Sentences', t: 'area', full: true },
+      { k: 'notes', l: 'Notes', t: 'area', full: true },
+    ],
+  },
+};
+const visibleFields = c => c.fields().filter(f => !(f.ja && !isJa()) && !(f.en && isJa()));
+const titleOf = (key, it) => (key === 'vocab' && it.kanji ? it.kanji : it[COL[key].titleKey]);
+function readingOf(key, it) {
+  if (key === 'vocab') return isJa()
+    ? [...new Set([it.kanji ? it.word : '', it.hiragana, it.katakana, it.romaji].filter(x => x && x !== titleOf('vocab', it)))].join(' · ')
+    : [it.ipa || it.pronunciation, it.part_of_speech].filter(Boolean).join(' · ');
+  if (key === 'kanji') return [it.onyomi && `音 ${it.onyomi}`, it.kunyomi && `訓 ${it.kunyomi}`].filter(Boolean).join('   ');
+  return it.romaji || '';
+}
+async function toggleFav(table, it) {
+  const v = !it.is_favorite;
+  const { error } = await sb.from(table).update({ is_favorite: v }).eq('id', it.id);
+  if (error) return fail(error);
+  it.is_favorite = v;
+  toast(v ? '⭐ เพิ่มใน Favorites แล้ว' : 'นำออกจาก Favorites แล้ว');
+}
+function speak(text) {
+  if (!('speechSynthesis' in window)) return toast('เบราว์เซอร์นี้ไม่รองรับการอ่านออกเสียง', 'err');
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(plain(text));
+  u.lang = isJa() ? 'ja-JP' : 'en-US'; u.rate = 0.9;
+  speechSynthesis.speak(u);
+}
+
+/* ================= COLLECTION LIST (Grammar / Vocab / Kanji) ================= */
+function itemCard(key, it) {
+  const c = COL[key], reading = readingOf(key, it);
+  return `<article class="card item-card ${key === 'kanji' ? 'kanji-card' : ''}" data-id="${it.id}">
+    <div class="item-top"><h3 class="item-title jp">${rich(titleOf(key, it))}</h3>
+      <button class="star ${it.is_favorite ? 'on' : ''}" data-fav="${it.id}" title="Favorite"><i data-lucide="star"></i></button></div>
+    ${reading ? `<p class="reading jp">${esc(reading)}</p>` : ''}
+    <p class="item-sub">${esc(it[c.subKey] || '')}</p>
+    <div class="chips">
+      ${it.category ? `<span class="chip">${esc(it.category)}</span>` : ''}
+      ${it[c.levelKey] ? `<span class="chip lvl">${esc(it[c.levelKey])}</span>` : ''}
+      ${key === 'kanji' && it.strokes ? `<span class="chip">${it.strokes} ขีด</span>` : ''}
+      ${key === 'grammar' && it.studied ? '<span class="chip ok">✓ Studied</span>' : ''}
+    </div>
+  </article>`;
+}
+
+async function renderCollection(root, key) {
+  const c = COL[key];
+  const { data, error } = await sb.from(c.table).select('*').eq('language', S.lang);
+  if (error) throw error;
+  const items = data;
+  root.innerHTML = `
+  <div class="page-head"><div><h1>${c.title()}</h1><p class="muted">${items.length} รายการ · ${langName()}</p></div>
+    <div class="head-actions">
+      ${key === 'vocab' ? `<button class="btn ghost" id="rand"><i data-lucide="shuffle"></i>Random</button><a class="btn ghost" href="#/review"><i data-lucide="layers"></i>Flashcards</a>` : ''}
+      <button class="btn" id="add"><i data-lucide="plus"></i>เพิ่ม ${c.name}</button>
+    </div></div>
+  <div class="toolbar card">
+    <div class="search-box"><i data-lucide="search"></i><input id="f-q" placeholder="ค้นหา..."></div>
+    ${c.catKind ? `<select id="f-cat"><option value="">ทุกหมวดหมู่</option>${catsOf(c.catKind).map(x => `<option>${esc(x.name)}</option>`).join('')}</select>` : ''}
+    <select id="f-lvl"><option value="">ทุกระดับ</option>${c.levels().map(x => `<option>${x}</option>`).join('')}</select>
+    ${key === 'kanji' ? '<input id="f-strokes" type="number" min="1" placeholder="จำนวนขีด">' : ''}
+    <select id="f-sort"><option value="new">ใหม่ล่าสุด</option><option value="old">เก่าสุด</option><option value="az">A → Z</option></select>
+    <label class="check"><input type="checkbox" id="f-fav"> ⭐ Favorites</label>
+  </div>
+  <div id="grid" class="grid"></div>`;
+
+  const grid = $('#grid', root);
+  const draw = () => {
+    const q = $('#f-q', root).value.trim().toLowerCase();
+    const cat = $('#f-cat', root)?.value, lvl = $('#f-lvl', root).value, st = $('#f-strokes', root)?.value;
+    const fav = $('#f-fav', root).checked, sort = $('#f-sort', root).value;
+    const list = items.filter(it =>
+      (!q || c.search.some(k => String(it[k] || '').toLowerCase().includes(q))) &&
+      (!cat || it.category === cat) && (!lvl || it[c.levelKey] === lvl) &&
+      (!st || Number(it.strokes) === Number(st)) && (!fav || it.is_favorite));
+    list.sort((a, b) => sort === 'az' ? String(a[c.titleKey] || '').localeCompare(String(b[c.titleKey] || ''), S.lang)
+      : sort === 'old' ? new Date(a.created_at) - new Date(b.created_at) : new Date(b.created_at) - new Date(a.created_at));
+    grid.innerHTML = list.length ? list.map(it => itemCard(key, it)).join('')
+      : empty('inbox', items.length ? 'ไม่พบรายการที่ตรงกับเงื่อนไข' : `ยังไม่มี ${c.name} — เริ่มเพิ่มรายการแรกของคุณได้เลย ✨`);
+    icons();
+  };
+  $('.toolbar', root).addEventListener('input', draw);
+  grid.onclick = async e => {
+    const favBtn = e.target.closest('[data-fav]');
+    if (favBtn) { e.stopPropagation(); await toggleFav(c.table, items.find(x => x.id === favBtn.dataset.fav)); return draw(); }
+    const card = e.target.closest('.item-card');
+    if (card) location.hash = `#/${key}/${card.dataset.id}`;
+  };
+  $('#add', root).onclick = () => openForm(key);
+  $('#rand', root)?.addEventListener('click', () => {
+    if (!items.length) return toast('ยังไม่มีคำศัพท์', 'err');
+    location.hash = `#/vocab/${items[Math.floor(Math.random() * items.length)].id}`;
+  });
+  draw();
+}
+
+/* ================= ADD / EDIT FORM ================= */
+function fieldHtml(f, val, catKind) {
+  const v = val ?? '', id = `fld-${f.k}`, req = f.req ? 'required' : '';
+  let input;
+  if (f.t === 'area') input = `<textarea id="${id}" name="${f.k}" rows="3" placeholder="${esc(f.ph || '')}" ${req}>${esc(v)}</textarea>`;
+  else if (f.t === 'select') {
+    const o = typeof f.o === 'function' ? f.o() : f.o;
+    input = `<select id="${id}" name="${f.k}"><option value="">—</option>${o.map(x => `<option ${x === v ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>`;
+  } else if (f.t === 'cat') {
+    input = `<input id="${id}" name="${f.k}" list="dl-${f.k}" value="${esc(v)}" placeholder="เลือก หรือพิมพ์เพื่อสร้างหมวดหมู่ใหม่"><datalist id="dl-${f.k}">${catsOf(catKind).map(x => `<option value="${esc(x.name)}">`).join('')}</datalist>`;
+  } else input = `<input id="${id}" name="${f.k}" type="${f.t === 'number' ? 'number' : 'text'}" ${f.t === 'number' ? 'min="1"' : ''} value="${esc(v)}" placeholder="${esc(f.ph || '')}" ${req}>`;
+  return `<div class="field ${f.full ? 'full' : ''}"><label for="${id}">${f.l}${f.req ? ' *' : ''}</label>${input}${f.hint ? `<small class="hint">${f.hint}</small>` : ''}</div>`;
+}
+
+function openForm(key, item = null) {
+  const c = COL[key], fs = visibleFields(c);
+  const m = modal(`${item ? 'แก้ไข' : 'เพิ่ม'} ${c.name} ${isJa() ? '🇯🇵' : '🇬🇧'}`,
+    `<form id="item-form" class="form-grid">${fs.map(f => fieldHtml(f, item?.[f.k], c.catKind)).join('')}
+     <div class="form-actions full"><button type="button" class="btn ghost" data-close>ยกเลิก</button><button class="btn" type="submit"><i data-lucide="save"></i>บันทึก</button></div></form>`, { wide: true });
+  const form = $('#item-form', m);
+  form.querySelector('input,textarea')?.focus();
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const btn = form.querySelector('[type=submit]');
+    btn.disabled = true; btn.textContent = 'กำลังบันทึก...';
+    const fd = new FormData(form), row = {};
+    fs.forEach(f => { const v = String(fd.get(f.k) ?? '').trim(); row[f.k] = f.t === 'number' ? (v ? parseInt(v, 10) : null) : (v || null); });
+    try {
+      if (c.catKind && row.category) await ensureCat(c.catKind, row.category);
+      const res = item
+        ? await sb.from(c.table).update(row).eq('id', item.id).select().single()
+        : await sb.from(c.table).insert({ ...row, language: S.lang }).select().single();
+      if (res.error) throw res.error;
+      if (!item) logActivity(c.addAct);
+      closeModal();
+      toast(item ? 'บันทึกการแก้ไขแล้ว' : 'เพิ่มรายการเรียบร้อย ✨');
+      router();
+    } catch (err) {
+      fail(err, 'บันทึกไม่สำเร็จ:');
+      btn.disabled = false; btn.textContent = 'บันทึก';
+    }
+  };
+}
+
+/* ================= DETAIL PAGE ================= */
+async function renderDetail(root, key, id) {
+  const c = COL[key];
+  const { data: it, error } = await sb.from(c.table).select('*').eq('id', id).eq('language', S.lang).maybeSingle();
+  if (error) throw error;
+  if (!it) { root.innerHTML = empty('search-x', 'ไม่พบรายการนี้ในพื้นที่ภาษานี้', `<a class="btn" href="#/${key}">กลับไปหน้ารายการ</a>`); return; }
+
+  let related = '';
+  if (key === 'kanji') {
+    const ch = it.character.replace(/[",()]/g, '');
+    const r = await sb.from('vocabulary').select('id,word,kanji,hiragana,meaning_th').eq('language', 'ja').or(`word.ilike."%${ch}%",kanji.ilike."%${ch}%"`);
+    const list = r.data || [];
+    related = `<div class="related"><h3><i data-lucide="link"></i>คำศัพท์ที่มีคันจิ ${esc(it.character)} (${list.length})</h3>
+      ${list.length ? `<ul class="mini-list">${list.map(v => `<li><a href="#/vocab/${v.id}"><span class="mini-title jp">${esc(v.kanji || v.word)}</span><span class="muted small jp">${esc(v.hiragana || '')} — ${esc(v.meaning_th || '')}</span></a></li>`).join('')}</ul>` : '<p class="muted small">ยังไม่มีคำศัพท์ในคลังที่ใช้คันจิตัวนี้</p>'}</div>`;
+  }
+  const title = titleOf(key, it), reading = readingOf(key, it);
+  const fs = visibleFields(c).filter(f => f.k !== c.titleKey && it[f.k] != null && it[f.k] !== '');
+  root.innerHTML = `
+  <a href="#/${key}" class="back"><i data-lucide="arrow-left"></i>กลับไปหน้า ${c.title()}</a>
+  <div class="card detail">
+    <div class="detail-head">
+      <div><h1 class="detail-title jp ${key === 'kanji' ? 'kanji-big' : ''}">${rich(title)}</h1>${reading ? `<p class="reading jp" style="font-size:1rem">${esc(reading)}</p>` : ''}</div>
+      <div class="head-actions">
+        <button class="btn ghost" id="speak"><i data-lucide="volume-2"></i>ฟังเสียง</button>
+        ${key === 'grammar' ? `<button class="btn ${it.studied ? 'soft' : 'ghost'}" id="studied"><i data-lucide="circle-check"></i>${it.studied ? 'เรียนแล้ว' : 'Mark as studied'}</button>` : ''}
+        <button class="btn ghost star-btn ${it.is_favorite ? 'on' : ''}" id="fav" title="Favorite"><i data-lucide="star"></i></button>
+        <button class="btn ghost" id="edit"><i data-lucide="pencil"></i>แก้ไข</button>
+        <button class="btn danger-ghost" id="del" title="ลบ"><i data-lucide="trash-2"></i></button>
+      </div>
+    </div>
+    <dl class="detail-list">
+      ${fs.map(f => `<div class="${f.t === 'area' ? 'full' : ''}"><dt>${f.l}</dt><dd class="jp">${rich(it[f.k])}</dd></div>`).join('')}
+      <div><dt>Date Created</dt><dd>${fmtDate(it.created_at)}</dd></div>
+      ${key !== 'grammar' ? `<div><dt>ทบทวนครั้งถัดไป</dt><dd>${fmtDate(it.due_at)}</dd></div>` : ''}
+      ${it.last_studied_at ? `<div><dt>เรียนล่าสุด</dt><dd>${fmtDate(it.last_studied_at)}</dd></div>` : ''}
+    </dl>
+    ${related}
+  </div>`;
+
+  $('#speak', root).onclick = () => speak(key === 'kanji' ? (it.hiragana || it.kunyomi || it.onyomi || it.character) : key === 'vocab' ? (it.kanji || it.word) : it.title);
+  const favBtn = $('#fav', root);
+  favBtn.onclick = async () => { await toggleFav(c.table, it); favBtn.classList.toggle('on', it.is_favorite); };
+  $('#edit', root).onclick = () => openForm(key, it);
+  $('#del', root).onclick = async () => {
+    if (!(await confirmBox(`ลบ "${plain(title)}" ใช่หรือไม่? การลบไม่สามารถย้อนกลับได้`))) return;
+    const { error: e } = await sb.from(c.table).delete().eq('id', it.id);
+    if (e) return fail(e);
+    toast('ลบรายการแล้ว'); location.hash = `#/${key}`;
+  };
+  $('#studied', root)?.addEventListener('click', async () => {
+    const v = !it.studied;
+    const { error: e } = await sb.from('grammar').update({ studied: v, last_studied_at: new Date().toISOString() }).eq('id', it.id);
+    if (e) return fail(e);
+    if (v) { logActivity('study_grammar'); toast('🎉 บันทึกว่าเรียนหัวข้อนี้แล้ว'); }
+    router();
+  });
+}
+
+/* ================= DASHBOARD ================= */
+async function renderDashboard(root) {
+  const L = S.lang, yearAgo = new Date(Date.now() - 365 * 864e5).toISOString();
+  const res = await Promise.all([
+    sb.from('vocabulary').select('id,word,kanji,meaning_th,created_at,last_studied_at,is_favorite,due_at,interval_days').eq('language', L),
+    sb.from('grammar').select('id,title,meaning_th,created_at,last_studied_at,is_favorite,studied').eq('language', L),
+    isJa() ? sb.from('kanji').select('id,character,meaning_th,created_at,last_studied_at,is_favorite,due_at,interval_days').eq('language', 'ja') : { data: [] },
+    sb.from('documents').select('id,title,category,created_at').eq('language', L),
+    sb.from('activity_log').select('action,amount,created_at').eq('language', L).gte('created_at', yearAgo).order('created_at', { ascending: false }),
+  ]);
+  res.forEach(r => { if (r.error) throw r.error; });
+  const [V, G, K, D, A] = res.map(r => r.data || []);
+  const items = [
+    ...V.map(x => ({ ...x, type: 'vocab', title: x.kanji || x.word, sub: x.meaning_th })),
+    ...G.map(x => ({ ...x, type: 'grammar', title: x.title, sub: x.meaning_th })),
+    ...K.map(x => ({ ...x, type: 'kanji', title: x.character, sub: x.meaning_th })),
+  ];
+  const docs = D.map(x => ({ ...x, type: 'docs', sub: x.category }));
+  const progress = calcProgress(V, G, K);
+  const due = [...V, ...K].filter(isDue).length;
+  const streak = calcStreak(A);
+  const week = lastNDays(7);
+  const studied = items.filter(x => x.last_studied_at).sort(byDesc('last_studied_at'));
+  const name = S.settings?.display_name || S.user.email.split('@')[0];
+  const miniList = (list, txt) => list.length
+    ? `<ul class="mini-list">${list.map(it => `<li><a href="#/${it.type}/${it.id}"><span class="tag t-${it.type}">${TYPE_LABEL[it.type]}</span><span class="mini-title jp">${rich(it.title)}</span><span class="muted small">${esc(it.sub || '')}</span></a></li>`).join('')}</ul>`
+    : `<p class="muted small">${txt}</p>`;
+  const activeDays = new Set(A.map(a => dayKey(a.created_at)));
+
+  root.innerHTML = `
+  <div class="page-head">
+    <div><h1>สวัสดี, ${esc(name)} 👋</h1><p class="muted">ยินดีต้อนรับสู่พื้นที่เรียน${langName()}ของคุณ</p></div>
+    <span class="streak-pill">🔥 เรียนต่อเนื่อง ${streak} วัน</span>
+  </div>
+  <div class="stats">
+    ${stat('languages', V.length, 'Total Vocabulary', isJa() ? `<small class="muted">+ Kanji ${K.length} ตัว</small>` : '')}
+    ${stat('book-open', G.length, 'Total Grammar')}
+    ${stat('file-text', D.length, 'Total Documents')}
+    ${stat('circle-check', G.filter(x => x.studied).length, 'Completed Lessons')}
+    ${stat('trending-up', progress + '%', 'Learning Progress', `<div class="progress" style="height:6px;margin-top:.3rem"><div style="width:${progress}%"></div></div>`)}
+  </div>
+  <div class="quick">
+    <button data-act="vocab"><i data-lucide="plus"></i>Add Vocabulary</button>
+    <button data-act="grammar"><i data-lucide="book-plus"></i>Add Grammar</button>
+    <button data-act="upload"><i data-lucide="upload"></i>Upload PDF</button>
+    <button data-act="review"><i data-lucide="brain"></i>Start Review</button>
+  </div>
+  <div class="dash-grid">
+    <div class="card continue"><h3><i data-lucide="circle-play"></i>Continue Learning</h3>
+      ${due ? `<div class="big">${due}</div><p style="margin:.3rem 0 1rem">รายการที่ควรทบทวนวันนี้</p><button class="btn" data-act="review">เริ่มทบทวนเลย</button>`
+            : `<p>🎉 ไม่มีรายการค้างทบทวนวันนี้</p><button class="btn ghost" data-act="vocab">เพิ่มคำศัพท์ใหม่</button>`}
+      ${studied[0] ? `<p class="small muted" style="margin-top:1rem">เรียนล่าสุด: <a href="#/${studied[0].type}/${studied[0].id}"><b class="jp">${rich(studied[0].title)}</b></a></p>` : ''}
+    </div>
+    <div class="card span2"><h3><i data-lucide="activity"></i>Weekly Learning Progress</h3>
+      ${chart(week.map(d => d.toLocaleDateString('th-TH', { weekday: 'short' })), [
+        { name: 'คำศัพท์/คันจิ', color: '#8FA98A', values: week.map(d => sumOn(A, d, ['add_vocab', 'add_kanji'])) },
+        { name: 'Grammar', color: '#C9A880', values: week.map(d => sumOn(A, d, ['add_grammar', 'study_grammar'])) },
+        { name: 'ทบทวน', color: '#B9CDB0', values: week.map(d => sumOn(A, d, ['review', 'quiz'])) },
+      ])}
+    </div>
+    <div class="card"><h3><i data-lucide="sparkles"></i>Recently Added</h3>${miniList([...items, ...docs].sort(byDesc('created_at')).slice(0, 6), 'ยังไม่มีข้อมูล — เริ่มเพิ่มคำศัพท์หรือ Grammar ได้เลย')}</div>
+    <div class="card"><h3><i data-lucide="clock"></i>Recently Studied</h3>${miniList(studied.slice(0, 6), 'ยังไม่มีประวัติการเรียน')}</div>
+    <div class="card"><h3><i data-lucide="star"></i>Favorite Items</h3>${miniList(items.filter(x => x.is_favorite).slice(0, 6), 'กด ⭐ ที่รายการเพื่อเพิ่มใน Favorites')}</div>
+    <div class="card span2"><h3><i data-lucide="list"></i>Learning Activity</h3>
+      ${A.length ? `<ul class="act-list">${A.slice(0, 6).map(a => `<li><span>${ACT[a.action]?.[0] || '•'}</span><span>${ACT[a.action]?.[1] || esc(a.action)}${a.amount > 1 ? ` × ${a.amount}` : ''}</span><span class="muted small">${timeAgo(a.created_at)}</span></li>`).join('')}</ul>` : '<p class="muted small">ยังไม่มีกิจกรรม</p>'}
+    </div>
+    <div class="card"><h3><i data-lucide="flame"></i>Learning Streak</h3>
+      <div class="big">${streak} <span style="font-size:1rem">วัน</span></div>
+      <div class="dots">${week.map(d => `<div class="dot ${activeDays.has(dayKey(d)) ? 'on' : ''}"><i></i>${d.toLocaleDateString('th-TH', { weekday: 'narrow' })}</div>`).join('')}</div>
+    </div>
+  </div>`;
+
+  root.onclick = e => {
+    const a = e.target.closest('[data-act]')?.dataset.act;
+    if (a === 'vocab') openForm('vocab');
+    else if (a === 'grammar') openForm('grammar');
+    else if (a === 'upload') openUpload();
+    else if (a === 'review') location.hash = '#/review';
+  };
+}
+
+/* ================= DOCUMENTS ================= */
+const docCats = () => (isJa() ? DOC_CATS : DOC_CATS.filter(c => c !== 'JLPT'));
+async function renderDocs(root) {
+  const { data, error } = await sb.from('documents').select('*').eq('language', S.lang).order('created_at', { ascending: false });
+  if (error) throw error;
+  const docs = data;
+  root.innerHTML = `
+  <div class="page-head"><div><h1>Documents (PDF)</h1><p class="muted">คลังเอกสาร${langName()} · ${docs.length} ไฟล์</p></div>
+    <button class="btn" id="up"><i data-lucide="upload"></i>Upload PDF</button></div>
+  <div class="toolbar card">
+    <div class="search-box"><i data-lucide="search"></i><input id="d-q" placeholder="ค้นหาชื่อ คำอธิบาย แท็ก ชื่อไฟล์..."></div>
+    <select id="d-cat"><option value="">ทุกหมวดหมู่</option>${docCats().map(c => `<option>${c}</option>`).join('')}</select>
+    <select id="d-sort"><option value="new">ใหม่ล่าสุด</option><option value="old">เก่าสุด</option><option value="az">ชื่อ A → Z</option></select>
+  </div>
+  <div id="d-list" class="doc-list"></div>`;
+  const list = $('#d-list', root);
+  const draw = () => {
+    const q = $('#d-q', root).value.trim().toLowerCase(), cat = $('#d-cat', root).value, sort = $('#d-sort', root).value;
+    const rows = docs.filter(d => (!cat || d.category === cat) && (!q || [d.title, d.description, d.file_name, (d.tags || []).join(' ')].join(' ').toLowerCase().includes(q)))
+      .sort((a, b) => sort === 'az' ? a.title.localeCompare(b.title) : sort === 'old' ? new Date(a.created_at) - new Date(b.created_at) : new Date(b.created_at) - new Date(a.created_at));
+    list.innerHTML = rows.length ? rows.map(d => `
+      <article class="card doc-card" data-id="${d.id}">
+        <div class="doc-icon"><i data-lucide="file-text"></i></div>
+        <div class="doc-body"><h3>${esc(d.title)}</h3>
+          ${d.description ? `<p class="muted small">${esc(d.description)}</p>` : ''}
+          <div class="chips">${d.category ? `<span class="chip lvl">${esc(d.category)}</span>` : ''}${(d.tags || []).map(t => `<span class="chip">#${esc(t)}</span>`).join('')}</div>
+          <p class="doc-meta" style="margin-top:.5rem">${esc(d.file_name)} · ${fmtSize(d.file_size || 0)} · ${fmtDate(d.created_at)}</p>
+        </div>
+        <div class="doc-actions">
+          <button class="icon-btn" data-dl title="Download"><i data-lucide="download"></i></button>
+          <button class="icon-btn danger" data-del title="ลบ"><i data-lucide="trash-2"></i></button>
+        </div>
+      </article>`).join('')
+      : empty('file-text', docs.length ? 'ไม่พบเอกสารที่ค้นหา' : 'ยังไม่มีเอกสาร PDF — กด Upload PDF เพื่อเริ่มสร้างคลังเอกสาร');
+    icons();
+  };
+  $('.toolbar', root).addEventListener('input', draw);
+  list.onclick = e => {
+    const card = e.target.closest('.doc-card'); if (!card) return;
+    const doc = docs.find(d => d.id === card.dataset.id);
+    if (e.target.closest('[data-dl]')) return downloadDoc(doc);
+    if (e.target.closest('[data-del]')) return deleteDoc(doc);
+    location.hash = `#/docs/${doc.id}`;
+  };
+  $('#up', root).onclick = openUpload;
+  draw();
+}
+async function downloadDoc(doc) {
+  const { data, error } = await sb.storage.from('documents').createSignedUrl(doc.file_path, 60, { download: doc.file_name });
+  if (error) return fail(error, 'ดาวน์โหลดไม่สำเร็จ:');
+  const a = document.createElement('a'); a.href = data.signedUrl; a.rel = 'noopener'; document.body.append(a); a.click(); a.remove();
+}
+async function deleteDoc(doc) {
+  if (!(await confirmBox(`ลบเอกสาร "${doc.title}" ใช่หรือไม่? ไฟล์จะถูกลบถาวร`))) return;
+  const st = await sb.storage.from('documents').remove([doc.file_path]);
+  if (st.error) return fail(st.error, 'ลบไฟล์ไม่สำเร็จ:');
+  const { error } = await sb.from('documents').delete().eq('id', doc.id);
+  if (error) return fail(error);
+  toast('ลบเอกสารแล้ว'); router();
+}
+function openUpload() {
+  let file = null;
+  const m = modal('Upload PDF', `<form id="up-form" class="form-grid">
+    <div class="field full"><label class="dropzone" id="dz"><i data-lucide="cloud-upload"></i><span id="dz-text">คลิกเพื่อเลือก หรือลากไฟล์ PDF มาวาง<br><small>รองรับเฉพาะ .pdf ขนาดไม่เกิน 50 MB</small></span><input type="file" id="up-file" accept="application/pdf,.pdf" hidden></label></div>
+    <div class="field full"><label for="up-title">Document Title *</label><input name="title" id="up-title" required></div>
+    <div class="field full"><label>Description</label><textarea name="description" rows="2"></textarea></div>
+    <div class="field"><label>Language</label><select name="language"><option value="en" ${!isJa() ? 'selected' : ''}>🇬🇧 English</option><option value="ja" ${isJa() ? 'selected' : ''}>🇯🇵 Japanese</option></select></div>
+    <div class="field"><label>Category</label><select name="category">${DOC_CATS.map(c => `<option>${c}</option>`).join('')}</select></div>
+    <div class="field full"><label>Tags</label><input name="tags" placeholder="คั่นด้วยจุลภาค เช่น TOEIC, reading, chapter 1"></div>
+    <div class="form-actions full"><button type="button" class="btn ghost" data-close>ยกเลิก</button><button class="btn" type="submit" id="up-btn"><i data-lucide="upload"></i>อัปโหลด</button></div>
+  </form>`, { wide: true });
+  const dz = $('#dz', m), input = $('#up-file', m);
+  const pick = f => {
+    if (!f) return;
+    if (f.type !== 'application/pdf' && !/\.pdf$/i.test(f.name)) return toast('รองรับเฉพาะไฟล์ PDF เท่านั้น', 'err');
+    if (f.size > 50 * 1048576) return toast('ไฟล์ใหญ่เกิน 50 MB', 'err');
+    file = f;
+    $('#dz-text', m).innerHTML = `<b>${esc(f.name)}</b><br><small>${fmtSize(f.size)}</small>`;
+    const t = $('#up-title', m); if (!t.value) t.value = f.name.replace(/\.pdf$/i, '');
+  };
+  input.onchange = () => pick(input.files[0]);
+  dz.ondragover = e => { e.preventDefault(); dz.classList.add('drag'); };
+  dz.ondragleave = () => dz.classList.remove('drag');
+  dz.ondrop = e => { e.preventDefault(); dz.classList.remove('drag'); pick(e.dataTransfer.files[0]); };
+  $('#up-form', m).onsubmit = async e => {
+    e.preventDefault();
+    if (!file) return toast('กรุณาเลือกไฟล์ PDF', 'err');
+    const fd = new FormData(e.target), lang = fd.get('language');
+    const btn = $('#up-btn', m); btn.disabled = true; btn.textContent = 'กำลังอัปโหลด...';
+    const path = `${S.user.id}/${lang}/${crypto.randomUUID()}.pdf`;
+    try {
+      const up = await sb.storage.from('documents').upload(path, file, { contentType: 'application/pdf' });
+      if (up.error) throw up.error;
+      const tags = String(fd.get('tags') || '').split(',').map(t => t.trim()).filter(Boolean);
+      const ins = await sb.from('documents').insert({
+        language: lang, title: String(fd.get('title')).trim(), description: String(fd.get('description') || '').trim() || null,
+        category: fd.get('category'), tags, file_name: file.name, file_path: path, file_size: file.size,
+      });
+      if (ins.error) { await sb.storage.from('documents').remove([path]); throw ins.error; }
+      logActivity('upload_doc', 1, lang);
+      closeModal();
+      toast(lang === S.lang ? 'อัปโหลดเรียบร้อย 📄' : `อัปโหลดแล้ว — ไฟล์อยู่ในคลัง ${lang === 'ja' ? 'Japanese' : 'English'}`);
+      if (location.hash === '#/docs') router(); else location.hash = '#/docs';
+    } catch (err) {
+      fail(err, 'อัปโหลดไม่สำเร็จ:');
+      btn.disabled = false; btn.textContent = 'อัปโหลด';
+    }
+  };
+}
+
+/* ================= PDF VIEWER (pdf.js) ================= */
+async function renderViewer(root, id) {
+  const { data: doc, error } = await sb.from('documents').select('*').eq('id', id).eq('language', S.lang).maybeSingle();
+  if (error) throw error;
+  if (!doc) { root.innerHTML = empty('file-x', 'ไม่พบเอกสารนี้ในคลังภาษานี้', '<a class="btn" href="#/docs">กลับไปหน้าเอกสาร</a>'); return; }
+  root.innerHTML = `<div class="viewer" id="viewer">
+    <div class="viewer-bar">
+      <a href="#/docs" class="icon-btn" title="กลับไปหน้ารายการเอกสาร"><i data-lucide="arrow-left"></i></a>
+      <div class="viewer-title" title="${esc(doc.title)}">${esc(doc.title)}</div>
+      <div class="vgroup">
+        <button class="icon-btn" id="v-prev" title="หน้าก่อนหน้า"><i data-lucide="chevron-up"></i></button>
+        <span class="pageinfo"><input id="v-page" type="number" min="1" value="1"> / <span id="v-total">–</span></span>
+        <button class="icon-btn" id="v-next" title="หน้าถัดไป"><i data-lucide="chevron-down"></i></button>
+      </div>
+      <div class="vgroup">
+        <button class="icon-btn" id="v-out" title="Zoom out"><i data-lucide="zoom-out"></i></button>
+        <button class="zoom-label" id="v-fit" title="พอดีความกว้าง">100%</button>
+        <button class="icon-btn" id="v-in" title="Zoom in"><i data-lucide="zoom-in"></i></button>
+      </div>
+      <div class="vgroup">
+        <button class="icon-btn" id="v-full" title="เต็มหน้าจอ"><i data-lucide="maximize"></i></button>
+        <button class="icon-btn" id="v-dl" title="ดาวน์โหลด"><i data-lucide="download"></i></button>
+      </div>
+    </div>
+    <div class="viewer-scroll" id="v-scroll">${loader('กำลังเปิดเอกสาร...')}</div>
+  </div>`;
+  icons();
+  $('#v-dl', root).onclick = () => downloadDoc(doc);
+
+  const pdfjs = await loadPdfJs();
+  const signed = await sb.storage.from('documents').createSignedUrl(doc.file_path, 3600);
+  if (signed.error) throw signed.error;
+  const pdf = await pdfjs.getDocument({ url: signed.data.signedUrl }).promise;
+
+  const scroller = $('#v-scroll', root), N = pdf.numPages;
+  $('#v-total', root).textContent = N; $('#v-page', root).max = N;
+  const base = (await pdf.getPage(1)).getViewport({ scale: 1 });
+  const fitScale = () => Math.min(2, Math.max(0.4, (scroller.clientWidth - 32) / base.width));
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let scale = fitScale(), gen = 0, current = 1, observer = null;
+
+  const renderPage = async (el, myGen) => {
+    if (el.dataset.done) return;
+    el.dataset.done = '1';
+    const page = await pdf.getPage(+el.dataset.page);
+    if (myGen !== gen) return;
+    const vp = page.getViewport({ scale: scale * dpr });
+    const canvas = document.createElement('canvas');
+    canvas.width = vp.width; canvas.height = vp.height;
+    canvas.style.width = vp.width / dpr + 'px'; canvas.style.height = vp.height / dpr + 'px';
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport: vp }).promise;
+    if (myGen !== gen) return;
+    el.style.width = canvas.style.width; el.style.height = canvas.style.height;
+    el.replaceChildren(canvas);
+  };
+  const build = () => {
+    const myGen = ++gen;
+    observer?.disconnect();
+    scroller.innerHTML = '';
+    for (let i = 1; i <= N; i++) {
+      const d = document.createElement('div');
+      d.className = 'pdf-page'; d.dataset.page = i;
+      d.style.width = base.width * scale + 'px'; d.style.height = base.height * scale + 'px';
+      scroller.append(d);
+    }
+    observer = new IntersectionObserver(ents => ents.forEach(en => en.isIntersecting && renderPage(en.target, myGen)), { root: scroller, rootMargin: '800px 0px' });
+    $('.pdf-page', scroller).forEach(p => observer.observe(p));
+    $('#v-fit', root).textContent = Math.round(scale * 100) + '%';
+  };
+  const setCur = n => { current = n; $('#v-page', root).value = n; };
+  const pageEl = n => scroller.querySelector(`[data-page="${n}"]`);
+  const goTo = n => { n = Math.max(1, Math.min(N, n || 1)); scroller.scrollTo({ top: pageEl(n).offsetTop - 12, behavior: 'smooth' }); setCur(n); };
+  const zoom = s => {
+    const keep = current;
+    scale = Math.min(4, Math.max(0.3, s));
+    build();
+    requestAnimationFrame(() => { scroller.scrollTop = pageEl(keep).offsetTop - 12; setCur(keep); });
+  };
+  scroller.addEventListener('scroll', () => {
+    const mid = scroller.scrollTop + scroller.clientHeight / 3;
+    let n = 1;
+    for (const p of scroller.children) { if (p.offsetTop <= mid) n = +p.dataset.page; else break; }
+    if (n !== current) setCur(n);
+  }, { passive: true });
+
+  $('#v-prev', root).onclick = () => goTo(current - 1);
+  $('#v-next', root).onclick = () => goTo(current + 1);
+  $('#v-page', root).onchange = e => goTo(+e.target.value);
+  $('#v-in', root).onclick = () => zoom(scale + 0.2);
+  $('#v-out', root).onclick = () => zoom(scale - 0.2);
+  $('#v-fit', root).onclick = () => zoom(fitScale());
+  $('#v-full', root).onclick = () => {
+    const v = $('#viewer', root);
+    if (document.fullscreenElement) document.exitFullscreen();
+    else if (v.requestFullscreen) v.requestFullscreen().catch(() => v.classList.toggle('pseudo-full'));
+    else v.classList.toggle('pseudo-full'); // iOS Safari fallback
+  };
+  const onKey = e => {
+    if (e.target.tagName === 'INPUT') return;
+    if (['ArrowRight', 'PageDown'].includes(e.key)) goTo(current + 1);
+    if (['ArrowLeft', 'PageUp'].includes(e.key)) goTo(current - 1);
+    if (e.key === 'Escape') $('#viewer', root)?.classList.remove('pseudo-full');
+  };
+  document.addEventListener('keydown', onKey);
+  S.cleanup = () => { document.removeEventListener('keydown', onKey); observer?.disconnect(); pdf.destroy(); };
+  build();
+}
+
+/* ================= SPACED REPETITION ================= */
+const GRADES = [{ th: 'จำไม่ได้', en: 'Again' }, { th: 'จำได้ยาก', en: 'Hard' }, { th: 'จำได้', en: 'Good' }, { th: 'จำได้ดี', en: 'Easy' }];
+function schedule(c, g) {
+  let ease = c.ease ?? 2.5, iv = c.interval_days ?? 0, reps = c.reps ?? 0;
+  const now = new Date(); let due;
+  if (g === 0) { reps = 0; iv = 0; ease = Math.max(1.3, ease - 0.2); due = new Date(now.getTime() + 10 * 60000); }
+  else {
+    if (g === 1) { iv = Math.max(1, Math.round(iv * 1.2)); ease = Math.max(1.3, ease - 0.15); }
+    else if (g === 2) { iv = reps === 0 ? 1 : reps === 1 ? 3 : Math.round(iv * ease); }
+    else { iv = reps === 0 ? 4 : Math.round(Math.max(iv, 1) * ease * 1.3); ease += 0.15; }
+    reps++; due = new Date(now.getTime() + iv * 864e5);
+  }
+  return { ease: +ease.toFixed(2), interval_days: iv, reps, due_at: due.toISOString(), last_studied_at: now.toISOString() };
+}
+const previewInterval = (c, g) => (g === 0 ? '10 นาที' : schedule(c, g).interval_days + ' วัน');
+
+/* ================= REVIEW HUB ================= */
+function buildMC(pool, promptFn, answerFn, subFn, label) {
+  const valid = pool.filter(answerFn);
+  const answers = [...new Set(valid.map(answerFn))];
+  if (answers.length < 4) return [];
+  return shuffle(valid).slice(0, 10).map(x => {
+    const a = answerFn(x);
+    return { prompt: promptFn(x), sub: subFn(x), label, answer: a, choices: shuffle([a, ...shuffle(answers.filter(y => y !== a)).slice(0, 3)]) };
+  });
+}
+function buildFill(V) {
+  return shuffle(V.filter(v => v.example && [v.word, v.kanji].some(w => w && v.example.toLowerCase().includes(w.toLowerCase())))).slice(0, 10).map(v => {
+    const w = [v.kanji, v.word].find(x => x && v.example.toLowerCase().includes(x.toLowerCase()));
+    const re = new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\ CODEBLOCK5 '), 'gi');
+    return { sentence: v.example.replace(re, '_____'), answer: w, accept: [v.word, v.kanji, v.hiragana, v.romaji].filter(Boolean).map(s => s.toLowerCase()), hint: v.meaning_th, tr: v.example_translation };
+  });
+}
+
+async function renderReview(root) {
+  const L = S.lang;
+  const res = await Promise.all([
+    sb.from('vocabulary').select('*').eq('language', L),
+    sb.from('grammar').select('id,title,meaning_th').eq('language', L),
+    isJa() ? sb.from('kanji').select('*').eq('language', 'ja') : { data: [] },
+    sb.from('review_history').select('*').eq('language', L).order('created_at', { ascending: false }).limit(6),
+  ]);
+  res.forEach(r => { if (r.error) throw r.error; });
+  const [V, G, K, H] = res.map(r => r.data || []);
+  V.forEach(x => (x._t = 'vocabulary')); K.forEach(x => (x._t = 'kanji'));
+  const dueV = V.filter(isDue), dueK = K.filter(isDue);
+  const modes = [
+    { id: 'mc', icon: 'list-checks', t: 'Multiple Choice', d: 'เลือกความหมายที่ถูกต้องของคำศัพท์', ok: new Set(V.map(x => x.meaning_th).filter(Boolean)).size >= 4, req: 'ต้องมีคำศัพท์ที่มีความหมายต่างกันอย่างน้อย 4 คำ' },
+    { id: 'grammar', icon: 'book-open', t: 'Grammar Quiz', d: 'ทายความหมายของหัวข้อไวยากรณ์', ok: new Set(G.map(x => x.meaning_th).filter(Boolean)).size >= 4, req: 'ต้องมี Grammar ที่ใส่ความหมายภาษาไทยอย่างน้อย 4 หัวข้อ' },
+    { id: 'fill', icon: 'pencil-line', t: 'Fill in the Blanks', d: 'เติมคำศัพท์ลงในประโยคตัวอย่าง', ok: buildFill(V).length > 0, req: 'ต้องมีคำศัพท์ที่ประโยคตัวอย่างมีคำนั้นอยู่' },
+    { id: 'match', icon: 'puzzle', t: 'Matching Words', d: 'จับคู่คำศัพท์กับความหมาย', ok: V.filter(x => x.meaning_th).length >= 4, req: 'ต้องมีคำศัพท์อย่างน้อย 4 คำ' },
+    ...(isJa() ? [{ id: 'kanji', icon: 'pen-tool', t: 'Kanji Review', d: `ทบทวนคันจิ (ถึงกำหนด ${dueK.length} ตัว)`, ok: K.length > 0, req: 'ยังไม่มีคันจิในคลัง' }] : []),
+    { id: 'random', icon: 'shuffle', t: 'Random Review', d: 'สุ่มการ์ด 20 ใบจากคลังทั้งหมด', ok: V.length + K.length > 0, req: 'ยังไม่มีคำศัพท์ในคลัง' },
+  ];
+  root.innerHTML = `
+  <div class="page-head"><div><h1>Review & Flashcards</h1><p class="muted">ทบทวนด้วยระบบ Spaced Repetition · ${langName()}</p></div></div>
+  <div class="card review-banner">
+    <div><div class="big">${dueV.length + dueK.length}</div><p style="margin:.3rem 0 0">รายการที่ควรทบทวนวันนี้ ${isJa() ? `(คำศัพท์ ${dueV.length} · คันจิ ${dueK.length})` : ''}</p></div>
+    <button class="btn" data-mode="srs" ${dueV.length + dueK.length ? '' : 'disabled'}><i data-lucide="brain"></i>เริ่มทบทวนตามกำหนด</button>
+  </div>
+  <div class="card" style="margin-bottom:1.2rem"><h3><i data-lucide="layers"></i>Vocabulary Flashcards</h3>
+    <div class="fc-options">
+      ${isJa() ? '<div class="field"><label>ประเภท</label><select id="fc-src"><option value="vocab">คำศัพท์</option><option value="kanji">คันจิ</option></select></div>' : ''}
+      <div class="field"><label>หมวดหมู่ (คำศัพท์)</label><select id="fc-cat"><option value="">ทั้งหมด</option>${catsOf('vocab').map(c => `<option>${esc(c.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>โหมด</label><select id="fc-mode"><option value="due">เฉพาะที่ถึงกำหนด</option><option value="all">สุ่มทั้งหมด</option></select></div>
+      <label class="check"><input type="checkbox" id="fc-fav"> เฉพาะ Favorites</label>
+      <button class="btn" data-mode="flash"><i data-lucide="play"></i>เริ่ม</button>
+    </div>
+  </div>
+  <div class="mode-grid">${modes.map(m => `<div class="card mode"><div class="ico"><i data-lucide="${m.icon}"></i></div><b>${m.t}</b><p>${m.ok ? m.d : `⚠️ ${m.req}`}</p><button class="btn ${m.ok ? '' : 'ghost'}" data-mode="${m.id}" ${m.ok ? '' : 'disabled'}>เริ่ม</button></div>`).join('')}</div>
+  <div class="card"><h3><i data-lucide="history"></i>ประวัติการทบทวนล่าสุด</h3>${historyTable(H)}</div>`;
+
+  const launch = mode => {
+    const again = () => launch(mode);
+    if (mode === 'srs') return startFlashcards(root, shuffle([...V, ...K].filter(isDue)), 'Spaced Repetition', again);
+    if (mode === 'flash') {
+      const src = $('#fc-src', root)?.value || 'vocab', cat = $('#fc-cat', root).value;
+      const due = $('#fc-mode', root).value === 'due', fav = $('#fc-fav', root).checked;
+      let pool = src === 'kanji' ? K : V;
+      if (cat && src === 'vocab') pool = pool.filter(x => x.category === cat);
+      if (fav) pool = pool.filter(x => x.is_favorite);
+      pool = due ? shuffle(pool.filter(isDue)) : shuffle(pool).slice(0, 30);
+      return startFlashcards(root, pool, src === 'kanji' ? 'Kanji Flashcards' : 'Vocabulary Flashcards', () => router());
+    }
+    if (mode === 'kanji') { const d = K.filter(isDue); return startFlashcards(root, d.length ? shuffle(d) : shuffle(K).slice(0, 20), 'Kanji Review', again); }
+    if (mode === 'random') return startFlashcards(root, shuffle([...V, ...K]).slice(0, 20), 'Random Review', again);
+    if (mode === 'mc') return startQuiz(root, 'Multiple Choice', buildMC(V, x => x.kanji || x.word, x => x.meaning_th, x => readingOf('vocab', x), 'คำนี้หมายความว่าอะไร?'), again);
+    if (mode === 'grammar') return startQuiz(root, 'Grammar Quiz', buildMC(G, x => x.title, x => x.meaning_th, () => '', 'ไวยากรณ์นี้หมายความว่าอะไร?'), again);
+    if (mode === 'fill') return startFill(root, buildFill(V), again);
+    if (mode === 'match') return startMatching(root, V, again);
+  };
+  root.onclick = e => { const b = e.target.closest('[data-mode]'); if (b && !b.disabled) launch(b.dataset.mode); };
+}
+
+/* ================= SESSIONS ================= */
+const sessionHead = (title, done, total) => `<div class="session">
+  <div class="session-head"><button class="btn ghost" id="quit"><i data-lucide="x"></i>ออก</button><span class="muted">${esc(title)}</span><span class="pill">${done}/${total}</span></div>
+  <div class="progress"><div style="width:${total ? (done / total) * 100 : 0}%"></div></div>`;
+const resultHtml = (mode, score, total, secs) => `<div class="session"><div class="card result">
+  <div class="result-emoji">${score / total >= 0.8 ? '🎉' : score / total >= 0.5 ? '👍' : '💪'}</div>
+  <h2>${esc(mode)} เสร็จแล้ว!</h2><p class="result-score">${score} / ${total}</p>
+  <p class="muted">${Math.round((score / total) * 100)}% · ใช้เวลา ${Math.floor(secs / 60)} นาที ${secs % 60} วินาที</p>
+  <div class="form-actions center"><button class="btn ghost" id="r-back">กลับหน้า Review</button><button class="btn" id="r-again"><i data-lucide="rotate-ccw"></i>ทำอีกครั้ง</button></div>
+</div></div>`;
+async function saveResult(root, mode, score, total, t0, action, again) {
+  if (!total) return router();
+  const secs = Math.round((Date.now() - t0) / 1000);
+  const { error } = await sb.from('review_history').insert({ language: S.lang, mode, score, total, duration_sec: secs });
+  if (error) fail(error, 'บันทึกผลไม่สำเร็จ:');
+  logActivity(action, total);
+  root.innerHTML = resultHtml(mode, score, total, secs); icons();
+  $('#r-back', root).onclick = () => router();
+  $('#r-again', root).onclick = again;
+}
+
+function fcFront(c) {
+  if (c._t === 'kanji') return `<div class="fc-big jp" style="font-size:5rem">${esc(c.character)}</div>`;
+  return `<div class="fc-big jp">${esc(c.kanji || c.word)}</div>${!isJa() && c.part_of_speech ? `<p class="muted">${esc(c.part_of_speech)}</p>` : ''}`;
+}
+function fcBack(c) {
+  const means = `<div class="fc-mean">${esc(c.meaning_th || '')}</div>${c.meaning_en ? `<p class="muted" style="margin:0">${esc(c.meaning_en)}</p>` : ''}`;
+  if (c._t === 'kanji') return `<div class="jp" style="font-size:2.2rem">${esc(c.character)}</div>
+    ${c.onyomi ? `<p style="margin:.2rem 0">音読み: <b class="jp">${esc(c.onyomi)}</b></p>` : ''}
+    ${c.kunyomi ? `<p style="margin:.2rem 0">訓読み: <b class="jp">${esc(c.kunyomi)}</b></p>` : ''}${means}
+    ${c.example_words ? `<div class="fc-ex jp">${rich(c.example_words)}</div>` : ''}`;
+  const reading = readingOf('vocab', c);
+  return `<div class="jp" style="font-size:1.4rem;font-weight:600">${esc(c.kanji || c.word)}</div>
+    ${reading ? `<p class="muted jp" style="margin:.1rem 0">${esc(reading)}</p>` : ''}${means}
+    ${c.example ? `<div class="fc-ex jp">${rich(c.example)}${c.example_translation ? `<br><span class="muted small">${esc(c.example_translation)}</span>` : ''}</div>` : ''}`;
+}
+
+function startFlashcards(root, cards, title, again) {
+  if (!cards.length) return toast('ไม่มีการ์ดสำหรับทบทวนตามเงื่อนไขนี้', 'err');
+  const queue = [...cards], seen = new Set(), total = cards.length, t0 = Date.now();
+  let done = 0, remembered = 0, flipped = false, finished = false;
+  const onKey = e => {
+    if (e.code === 'Space') { e.preventDefault(); flip(); }
+    else if (flipped && ['1', '2', '3', '4'].includes(e.key)) grade(+e.key - 1);
+  };
+  const finish = () => {
+    if (finished) return; finished = true;
+    document.removeEventListener('keydown', onKey);
+    saveResult(root, title, remembered, done, t0, 'review', again);
+  };
+  const flip = () => {
+    const fc = $('#fc', root); if (!fc) return;
+    flipped = !flipped; fc.classList.toggle('flipped', flipped);
+    if (flipped) $('#grades', root).hidden = false;
+  };
+  const grade = g => {
+    const c = queue.shift();
+    const upd = schedule(c, g);
+    sb.from(c._t).update(upd).eq('id', c.id).then(({ error }) => error && fail(error));
+    Object.assign(c, upd);
+    if (!seen.has(c.id)) { seen.add(c.id); done++; if (g >= 2) remembered++; }
+    if (g === 0) queue.push(c); // จำไม่ได้ -> วนกลับมาท้ายรอบนี้
+    show();
+  };
+  const show = () => {
+    if (!queue.length) return finish();
+    const c = queue[0]; flipped = false;
+    root.innerHTML = sessionHead(title, done, total) + `
+      <div class="flashcard" id="fc"><div class="fc-inner">
+        <div class="fc-face fc-front">${fcFront(c)}<span class="fc-hint">แตะเพื่อพลิกการ์ด</span></div>
+        <div class="fc-face fc-back">${fcBack(c)}</div>
+      </div></div>
+      <div class="grades" id="grades" hidden>${GRADES.map((gr, i) => `<button class="grade g${i}" data-g="${i}"><b>${gr.th}</b><small>${gr.en} · ${previewInterval(c, i)}</small></button>`).join('')}</div>
+      <p class="muted center small">Space = พลิกการ์ด · 1–4 = ให้คะแนนความจำ</p></div>`;
+    icons();
+    $('#fc', root).onclick = flip;
+    $('#grades', root).onclick = e => { const b = e.target.closest('[data-g]'); if (b) grade(+b.dataset.g); };
+    $('#quit', root).onclick = finish;
+  };
+  document.addEventListener('keydown', onKey);
+  S.cleanup = () => document.removeEventListener('keydown', onKey);
+  show();
+}
+
+function startQuiz(root, title, qs, again) {
+  if (!qs.length) return toast('ข้อมูลยังไม่พอสำหรับสร้าง Quiz', 'err');
+  let i = 0, score = 0; const t0 = Date.now();
+  const show = () => {
+    if (i >= qs.length) return saveResult(root, title, score, qs.length, t0, 'quiz', again);
+    const q = qs[i]; let answered = false;
+    root.innerHTML = sessionHead(title, i, qs.length) + `<div class="card">
+      <p class="muted small">${esc(q.label)}</p><h2 class="quiz-prompt jp">${rich(q.prompt)}</h2>
+      ${q.sub ? `<p class="muted jp" style="margin-top:-.6rem">${esc(q.sub)}</p>` : ''}
+      <div class="choices">${q.choices.map((c, j) => `<button class="choice" data-j="${j}">${esc(c)}</button>`).join('')}</div>
+      <div class="form-actions" id="nx"></div></div></div>`;
+    icons();
+    $('#quit', root).onclick = () => router();
+    $('.choices', root).onclick = e => {
+      const b = e.target.closest('.choice'); if (!b || answered) return;
+      answered = true;
+      if (q.choices[+b.dataset.j] === q.answer) score++;
+      $('.choice', root).forEach(x => {
+        const v = q.choices[+x.dataset.j];
+        if (v === q.answer) x.classList.add('correct'); else if (x === b) x.classList.add('wrong');
+        x.disabled = true;
+      });
+      $('#nx', root).innerHTML = `<button class="btn" id="next">${i + 1 < qs.length ? 'ถัดไป →' : 'ดูผลลัพธ์'}</button>`;
+      $('#next', root).onclick = () => { i++; show(); };
+    };
+  };
+  show();
+}
+
+function startFill(root, qs, again) {
+  if (!qs.length) return toast('ข้อมูลยังไม่พอสำหรับแบบฝึกนี้', 'err');
+  let i = 0, score = 0; const t0 = Date.now();
+  const show = () => {
+    if (i >= qs.length) return saveResult(root, 'Fill in the Blanks', score, qs.length, t0, 'quiz', again);
+    const q = qs[i];
+    root.innerHTML = sessionHead('Fill in the Blanks', i, qs.length) + `<div class="card">
+      <p class="muted small">เติมคำที่หายไป · ความหมาย: <b>${esc(q.hint || '-')}</b></p>
+      <h2 class="quiz-prompt jp">${rich(q.sentence)}</h2>${q.tr ? `<p class="muted">${esc(q.tr)}</p>` : ''}
+      <form id="fill-form" class="inline-form"><input id="fill-in" autocomplete="off" placeholder="พิมพ์คำตอบ..."><button class="btn">ตรวจคำตอบ</button></form>
+      <div id="fb"></div></div></div>`;
+    icons();
+    $('#quit', root).onclick = () => router();
+    const inp = $('#fill-in', root); inp.focus();
+    $('#fill-form', root).onsubmit = e => {
+      e.preventDefault();
+      if (inp.disabled) { i++; return show(); }
+      const v = inp.value.trim().toLowerCase(); if (!v) return;
+      const ok = q.accept.includes(v); if (ok) score++;
+      inp.disabled = true;
+      $('#fb', root).innerHTML = `<div class="feedback ${ok ? 'ok' : 'no'}">${ok ? 'ถูกต้อง! 🎉' : `ยังไม่ถูก — คำตอบคือ <b class="jp">${esc(q.answer)}</b>`}</div>`;
+      e.target.querySelector('button').textContent = i + 1 < qs.length ? 'ถัดไป →' : 'ดูผลลัพธ์';
+    };
+  };
+  show();
+}
+
+function startMatching(root, V, again) {
+  const set = shuffle(V.filter(x => x.meaning_th)).slice(0, 6);
+  if (set.length < 4) return toast('ต้องมีคำศัพท์อย่างน้อย 4 คำ', 'err');
+  const t0 = Date.now(); let L = null, R = null, matched = 0, mistakes = 0;
+  root.innerHTML = sessionHead('Matching Words', 0, set.length) + `
+    <p class="muted center small">แตะคำศัพท์ แล้วแตะความหมายที่ตรงกัน</p>
+    <div class="match-grid">
+      <div class="match-col">${set.map(v => `<button class="match-item jp" data-id="${v.id}" data-side="L">${esc(v.kanji || v.word)}</button>`).join('')}</div>
+      <div class="match-col">${shuffle(set).map(v => `<button class="match-item" data-id="${v.id}" data-side="R">${esc(v.meaning_th)}</button>`).join('')}</div>
+    </div></div>`;
+  icons();
+  $('#quit', root).onclick = () => router();
+  $('.match-grid', root).onclick = e => {
+    const b = e.target.closest('.match-item'); if (!b || b.classList.contains('matched')) return;
+    if (b.dataset.side === 'L') { L?.classList.remove('sel'); L = b; } else { R?.classList.remove('sel'); R = b; }
+    b.classList.add('sel');
+    if (!(L && R)) return;
+    if (L.dataset.id === R.dataset.id) {
+      [L, R].forEach(x => { x.classList.remove('sel'); x.classList.add('matched'); x.disabled = true; });
+      matched++;
+      $('.pill', root).textContent = `${matched}/${set.length}`;
+      $('.progress div', root).style.width = (matched / set.length) * 100 + '%';
+      if (matched === set.length) setTimeout(() => saveResult(root, 'Matching Words', Math.max(0, set.length - mistakes), set.length, t0, 'quiz', again), 400);
+    } else {
+      mistakes++;
+      [L, R].forEach(x => { x.classList.remove('sel'); x.classList.add('bad'); setTimeout(() => x.classList.remove('bad'), 400); });
+    }
+    L = R = null;
+  };
+}
+
+/* ================= LEARNING PROGRESS ================= */
+function openGoals(after) {
+  const G = goals();
+  const m = modal(`เป้าหมายรายวัน — ${langName()}`, `<form id="goal-form" class="form-grid">
+    <div class="field"><label>เพิ่มคำศัพท์ (คำ/วัน)</label><input type="number" name="vocab" min="0" value="${G.vocab}"></div>
+    <div class="field"><label>เรียน Grammar (หัวข้อ/วัน)</label><input type="number" name="grammar" min="0" value="${G.grammar}"></div>
+    <div class="field full"><label>เวลาทบทวน (นาที/วัน)</label><input type="number" name="minutes" min="0" value="${G.minutes}"></div>
+    <div class="form-actions full"><button type="button" class="btn ghost" data-close>ยกเลิก</button><button class="btn">บันทึก</button></div></form>`);
+  $('#goal-form', m).onsubmit = async e => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const g = { vocab: +fd.get('vocab') || 0, grammar: +fd.get('grammar') || 0, minutes: +fd.get('minutes') || 0 };
+    const all = { ...(S.settings.goals || {}), [S.lang]: g };
+    const { error } = await sb.from('user_settings').update({ goals: all }).eq('user_id', S.user.id);
+    if (error) return fail(error);
+    S.settings.goals = all; closeModal(); toast('บันทึกเป้าหมายแล้ว 🎯'); after?.();
+  };
+}
+
+async function renderProgress(root) {
+  const L = S.lang, yearAgo = new Date(Date.now() - 365 * 864e5).toISOString();
+  const res = await Promise.all([
+    sb.from('activity_log').select('action,amount,created_at').eq('language', L).gte('created_at', yearAgo),
+    sb.from('review_history').select('*').eq('language', L).order('created_at', { ascending: false }).limit(300),
+    sb.from('vocabulary').select('interval_days').eq('language', L),
+    sb.from('grammar').select('studied').eq('language', L),
+    isJa() ? sb.from('kanji').select('interval_days').eq('language', 'ja') : { data: [] },
+  ]);
+  res.forEach(r => { if (r.error) throw r.error; });
+  const [A, H, V, G, K] = res.map(r => r.data || []);
+  const td = new Date(), g = goals();
+  const tV = sumOn(A, td, ['add_vocab', 'add_kanji']);
+  const tG = sumOn(A, td, ['add_grammar', 'study_grammar']);
+  const tM = Math.round(H.filter(h => dayKey(h.created_at) === dayKey(td)).reduce((s, h) => s + (h.duration_sec || 0), 0) / 60);
+  const goalBar = (label, val, target, unit) => {
+    const p = target ? Math.min(100, Math.round((val / target) * 100)) : 100;
+    return `<div class="goal"><div class="goal-row"><span>${label}</span><b>${val} / ${target} ${unit} ${p >= 100 ? '✅' : ''}</b></div><div class="progress"><div style="width:${p}%"></div></div></div>`;
+  };
+  const avg = H.length ? Math.round((H.reduce((s, h) => s + (h.total ? h.score / h.total : 0), 0) / H.length) * 100) : 0;
+  const reviewed = A.filter(a => a.action === 'review' || a.action === 'quiz').reduce((s, a) => s + (a.amount || 1), 0);
+  const progress = calcProgress(V, G, K);
+  const week = lastNDays(7), month = lastNDays(30);
+  const ALL = Object.keys(ACT);
+
+  root.innerHTML = `
+  <div class="page-head"><div><h1>Learning Progress</h1><p class="muted">ติดตามผลการเรียน${langName()}</p></div>
+    <button class="btn ghost" id="edit-goals"><i data-lucide="target"></i>ตั้งเป้าหมาย</button></div>
+  <div class="stats">
+    ${stat('flame', calcStreak(A) + ' วัน', 'เรียนต่อเนื่อง')}
+    ${stat('layers', reviewed, 'รายการที่ทบทวนแล้ว')}
+    ${stat('award', avg + '%', 'คะแนน Quiz เฉลี่ย')}
+    ${stat('circle-check', G.filter(x => x.studied).length, 'Grammar ที่เรียนแล้ว')}
+    ${stat('trending-up', progress + '%', 'ความก้าวหน้า', `<div class="progress" style="height:6px;margin-top:.3rem"><div style="width:${progress}%"></div></div>`)}
+  </div>
+  <div class="two-col">
+    <div class="card"><h3><i data-lucide="target"></i>เป้าหมายวันนี้</h3>
+      ${goalBar('เพิ่มคำศัพท์', tV, g.vocab, 'คำ')}${goalBar('เรียน Grammar', tG, g.grammar, 'หัวข้อ')}${goalBar('เวลาทบทวน', tM, g.minutes, 'นาที')}</div>
+    <div class="card"><h3><i data-lucide="activity"></i>สถิติรายสัปดาห์</h3>
+      ${chart(week.map(d => d.toLocaleDateString('th-TH', { weekday: 'short' })), [
+        { name: 'คำศัพท์ที่เพิ่ม', color: '#8FA98A', values: week.map(d => sumOn(A, d, ['add_vocab', 'add_kanji'])) },
+        { name: 'Grammar', color: '#C9A880', values: week.map(d => sumOn(A, d, ['add_grammar', 'study_grammar'])) },
+        { name: 'ทบทวน', color: '#B9CDB0', values: week.map(d => sumOn(A, d, ['review', 'quiz'])) },
+      ])}</div>
+  </div>
+  <div class="card" style="margin-bottom:1rem"><h3><i data-lucide="calendar"></i>สถิติรายเดือน (30 วันล่าสุด)</h3>
+    ${chart(month.map((d, i) => (i % 5 === 4 || i === 29 ? d.getDate() + '/' + (d.getMonth() + 1) : '')), [{ name: 'กิจกรรมทั้งหมด', color: '#8FA98A', values: month.map(d => sumOn(A, d, ALL)) }])}</div>
+  <div class="card"><h3><i data-lucide="history"></i>ประวัติคะแนน Quiz & Review</h3>${historyTable(H.slice(0, 15))}</div>`;
+  $('#edit-goals', root).onclick = () => openGoals(() => router());
+}
+
+/* ================= SETTINGS ================= */
+async function renderSettings(root) {
+  const st = S.settings || {}, G = goals();
+  const catBlock = kind => `<div class="cat-chips">${catsOf(kind).map(c => `<span class="cat-chip">${esc(c.name)}<button data-delcat="${c.id}" title="ลบ"><i data-lucide="x"></i></button></span>`).join('') || '<span class="muted small">ยังไม่มีหมวดหมู่</span>'}</div>
+    <form class="inline-form" data-addcat="${kind}"><input placeholder="ชื่อหมวดหมู่ใหม่" required><button class="btn">เพิ่ม</button></form>`;
+  root.innerHTML = `
+  <div class="page-head"><div><h1>Settings</h1><p class="muted">ตั้งค่าบัญชีและพื้นที่เรียน${langName()}</p></div></div>
+  <div class="settings">
+    <div class="card"><h3><i data-lucide="user"></i>โปรไฟล์</h3>
+      <form id="profile" class="inline-form"><input name="name" value="${esc(st.display_name || '')}" placeholder="ชื่อที่แสดง"><button class="btn">บันทึก</button></form>
+      <p class="small muted">อีเมล: ${esc(S.user.email)}</p></div>
+    <div class="card"><h3><i data-lucide="languages"></i>ภาษาที่กำลังเรียน</h3>
+      <p>ตอนนี้อยู่ในพื้นที่ <b>${langName()}</b> — ข้อมูลแต่ละภาษาแยกจากกันโดยสมบูรณ์</p>
+      <button class="btn ghost" id="sw"><i data-lucide="repeat"></i>สลับไป ${isJa() ? '🇬🇧 English' : '🇯🇵 Japanese'}</button></div>
+    <div class="card"><h3><i data-lucide="target"></i>เป้าหมายรายวัน</h3>
+      <p>คำศัพท์ ${G.vocab} คำ · Grammar ${G.grammar} หัวข้อ · ทบทวน ${G.minutes} นาที</p>
+      <button class="btn ghost" id="goals">แก้ไขเป้าหมาย</button></div>
+    <div class="card"><h3><i data-lucide="tags"></i>หมวดหมู่คำศัพท์</h3>${catBlock('vocab')}</div>
+    <div class="card"><h3><i data-lucide="tags"></i>หมวดหมู่ Grammar</h3>${catBlock('grammar')}</div>
+    <div class="card"><h3><i data-lucide="log-out"></i>บัญชี</h3><button class="btn danger-ghost" id="logout"><i data-lucide="log-out"></i>ออกจากระบบ</button></div>
+  </div>`;
+  $('#sw', root).onclick = switchLang;
+  $('#goals', root).onclick = () => openGoals(() => router());
+  $('#logout', root).onclick = async () => { await sb.auth.signOut(); };
+  root.addEventListener('submit', async e => {
+    e.preventDefault();
+    if (e.target.id === 'profile') {
+      const name = new FormData(e.target).get('name').trim();
+      const { error } = await sb.from('user_settings').update({ display_name: name }).eq('user_id', S.user.id);
+      if (error) return fail(error);
+      S.settings.display_name = name; toast('บันทึกโปรไฟล์แล้ว');
+    } else if (e.target.dataset.addcat) {
+      const name = e.target.querySelector('input').value.trim();
+      if (catsOf(e.target.dataset.addcat).some(c => c.name === name)) return toast('มีหมวดหมู่นี้อยู่แล้ว', 'err');
+      await ensureCat(e.target.dataset.addcat, name); toast('เพิ่มหมวดหมู่แล้ว'); router();
+    }
+  });
+  root.addEventListener('click', async e => {
+    const b = e.target.closest('[data-delcat]'); if (!b) return;
+    const { error } = await sb.from('categories').delete().eq('id', b.dataset.delcat);
+    if (error) return fail(error);
+    S.cats = S.cats.filter(c => c.id !== b.dataset.delcat); toast('ลบหมวดหมู่แล้ว'); router();
+  });
+}
+
+/* ================= GLOBAL SEARCH ================= */
+async function renderSearch(root, qs) {
+  const q = (qs.get('q') || '').trim();
+  $('#global-search').value = q;
+  const s = q.replace(/[",()\\%*]/g, ' ').trim();
+  if (!s) { root.innerHTML = empty('search', 'พิมพ์คำที่ต้องการค้นหาในช่องค้นหาด้านบน'); return; }
+  const like = cols => cols.map(c => `${c}.ilike."%${s}%"`).join(',');
+  const L = S.lang;
+  const res = await Promise.all([
+    sb.from('grammar').select('id,title,meaning_th,category,difficulty,created_at').eq('language', L).or(like(['title', 'meaning_th', 'explanation', 'examples', 'usage', 'romaji'])),
+    sb.from('vocabulary').select('id,word,kanji,meaning_th,category,level,created_at').eq('language', L).or(like(['word', 'kanji', 'hiragana', 'katakana', 'romaji', 'meaning_th', 'meaning_en'])),
+    isJa() ? sb.from('kanji').select('id,character,meaning_th,jlpt,created_at').eq('language', 'ja').or(like(['character', 'onyomi', 'kunyomi', 'hiragana', 'meaning_th', 'meaning_en'])) : { data: [] },
+    sb.from('documents').select('id,title,description,category,created_at').eq('language', L).or(like(['title', 'description', 'file_name'])),
+  ]);
+  res.forEach(r => { if (r.error) throw r.error; });
+  const [G, V, K, D] = res.map(r => r.data || []);
+  const all = [
+    ...G.map(x => ({ type: 'grammar', id: x.id, title: x.title, sub: x.meaning_th, meta: [x.category, x.difficulty], date: x.created_at })),
+    ...V.map(x => ({ type: 'vocab', id: x.id, title: x.kanji || x.word, sub: x.meaning_th, meta: [x.category, x.level], date: x.created_at })),
+    ...K.map(x => ({ type: 'kanji', id: x.id, title: x.character, sub: x.meaning_th, meta: [x.jlpt], date: x.created_at })),
+    ...D.map(x => ({ type: 'docs', id: x.id, title: x.title, sub: x.description, meta: [x.category], date: x.created_at })),
+  ];
+  const types = [['', 'ทั้งหมด'], ['grammar', 'Grammar'], ['vocab', 'Vocabulary'], ...(isJa() ? [['kanji', 'Kanji']] : []), ['docs', 'PDF']];
+  let type = '';
+  root.innerHTML = `
+  <div class="page-head"><div><h1>ผลการค้นหา “${esc(q)}”</h1><p class="muted">พบ ${all.length} รายการใน${langName()}</p></div>
+    <select id="s-sort" style="width:auto"><option value="new">ใหม่ล่าสุด</option><option value="old">เก่าสุด</option></select></div>
+  <div class="filter-chips">${types.map(([k, l]) => `<button class="fchip ${k === '' ? 'on' : ''}" data-type="${k}">${l} (${k ? all.filter(x => x.type === k).length : all.length})</button>`).join('')}</div>
+  <div id="s-list" class="result-list"></div>`;
+  const draw = () => {
+    const sort = $('#s-sort', root).value;
+    const list = all.filter(x => !type || x.type === type).sort((a, b) => (sort === 'old' ? 1 : -1) * (new Date(a.date) - new Date(b.date)));
+    $('#s-list', root).innerHTML = list.length ? list.map(it => `
+      <a class="card result-item" href="#/${it.type}/${it.id}"><span class="tag t-${it.type}">${TYPE_LABEL[it.type]}</span>
+        <div style="min-width:0;flex:1"><b class="jp">${rich(it.title)}</b><div class="muted small">${esc(it.sub || '')}</div></div>
+        <div class="chips">${it.meta.filter(Boolean).map(m => `<span class="chip">${esc(m)}</span>`).join('')}</div></a>`).join('')
+      : empty('search-x', 'ไม่พบผลลัพธ์');
+    icons();
+  };
+  root.querySelector('.filter-chips').onclick = e => {
+    const b = e.target.closest('[data-type]'); if (!b) return;
+    type = b.dataset.type; $('.fchip', root).forEach(x => x.classList.toggle('on', x === b)); draw();
+  };
+  $('#s-sort', root).onchange = draw;
+  draw();
+}
+
+/* ================= AUTH & BOOT ================= */
+let authMode = 'in';
+$('#auth-switch').onclick = e => {
+  e.preventDefault();
+  authMode = authMode === 'in' ? 'up' : 'in';
+  const up = authMode === 'up';
+  $('#auth-title').textContent = up ? 'สร้างบัญชีใหม่' : 'เข้าสู่ระบบ';
+  $('#auth-btn').textContent = up ? 'สมัครสมาชิก' : 'เข้าสู่ระบบ';
+  $('#auth-switch-text').textContent = up ? 'มีบัญชีแล้ว?' : 'ยังไม่มีบัญชี?';
+  $('#auth-switch').innerHTML = `<b>${up ? 'เข้าสู่ระบบ' : 'สมัครสมาชิก'}</b>`;
+  $('#auth-msg').textContent = '';
+};
+$('#auth-form').onsubmit = async e => {
+  e.preventDefault();
+  const email = $('#auth-email').value.trim(), password = $('#auth-pass').value;
+  const btn = $('#auth-btn'), msg = $('#auth-msg');
+  btn.disabled = true; msg.className = 'auth-msg'; msg.textContent = '';
+  const { data, error } = authMode === 'in'
+    ? await sb.auth.signInWithPassword({ email, password })
+    : await sb.auth.signUp({ email, password });
+  btn.disabled = false;
+  if (error) { msg.textContent = error.message; return; }
+  if (authMode === 'up' && !data.session) { msg.className = 'auth-msg ok'; msg.textContent = 'สมัครสำเร็จ! กรุณายืนยันอีเมลก่อนเข้าสู่ระบบ'; }
+};
+
+async function start(session) {
+  const user = session?.user || null;
+  if (user && S.user?.id === user.id) return;
+  S.user = user;
+  if (!user) { S.settings = null; $('#app').hidden = true; $('#auth').hidden = false; view().innerHTML = ''; return; }
+  $('#auth').hidden = true; $('#app').hidden = false;
+  applyLang();
+  view().innerHTML = loader('กำลังเตรียมพื้นที่เรียน...');
+  try { await loadSettings(); } catch (e) { fail(e, 'โหลดการตั้งค่าไม่สำเร็จ:'); }
+  applyLang();
+  if (!location.hash || location.hash === '#' || location.hash === '#/') location.hash = '#/dashboard'; else router();
+}
+
+if (SUPABASE_URL.includes('YOUR-')) {
+  $('#auth').hidden = false;
+  $('#auth-msg').textContent = '⚠️ กรุณาใส่ SUPABASE_URL และ SUPABASE_ANON_KEY ในไฟล์ config.js ก่อนใช้งาน';
+} else {
+  sb.auth.getSession().then(({ data }) => start(data.session));
+  sb.auth.onAuthStateChange((event, session) => {
+    if (event === 'SIGNED_IN') start(session);
+    if (event === 'SIGNED_OUT') start(null);
+  });
+}
